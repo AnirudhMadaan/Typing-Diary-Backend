@@ -94,10 +94,11 @@ async function requireUser(req, res) {
 }
 
 function setSession(res, userId) {
+  const isProduction = process.env.NODE_ENV === "production" || Boolean(process.env.VERCEL);
   res.cookie(cookieName, signSession(userId), {
     httpOnly: true,
-    sameSite: "lax",
-    secure: process.env.NODE_ENV === "production",
+    sameSite: isProduction ? "none" : "lax",
+    secure: isProduction,
     maxAge: sessionLifetime * 1000,
     path: "/",
   });
@@ -122,22 +123,16 @@ function normalizeEntry(body) {
   return { title, content, mood, seconds, words, wpm };
 }
 
-const allowedOrigins = new Set([
-  "http://localhost:5500",
-  "http://127.0.0.1:5500",
-  "http://localhost:3000",
-  "http://127.0.0.1:3000",
-]);
-
+// Fixed CORS configuration for Vercel
 app.use(cors({
-  origin(origin, callback) {
-    callback(null, !origin || allowedOrigins.has(origin));
-  },
+  origin: true,
   credentials: true,
 }));
+
 app.use(cookieParser());
 app.use(express.json({ limit: "100kb" }));
 
+app.get("/", (_req, res) => res.send("Typing Diary API is live!"));
 app.get("/api/healthz", (_req, res) => res.json({ status: "ok" }));
 
 app.post("/api/auth/register", async (req, res) => {
@@ -167,7 +162,13 @@ app.post("/api/auth/login", async (req, res) => {
 });
 
 app.post("/api/auth/logout", (_req, res) => {
-  res.clearCookie(cookieName, { httpOnly: true, sameSite: "lax", path: "/" });
+  const isProduction = process.env.NODE_ENV === "production" || Boolean(process.env.VERCEL);
+  res.clearCookie(cookieName, { 
+    httpOnly: true, 
+    sameSite: isProduction ? "none" : "lax", 
+    secure: isProduction, 
+    path: "/" 
+  });
   return res.status(204).send();
 });
 
@@ -228,7 +229,10 @@ app.delete("/api/entries/:id", async (req, res) => {
   return res.status(204).send();
 });
 
-app.listen(port, () => {
-  console.log(`Typing Diary backend listening on http://localhost:${port}`);
-});
+if (!process.env.VERCEL) {
+  app.listen(port, () => {
+    console.log(`Typing Diary backend listening on http://localhost:${port}`);
+  });
+}
+
 export default app;
