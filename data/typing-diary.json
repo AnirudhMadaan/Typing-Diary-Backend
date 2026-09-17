@@ -1,26 +1,4 @@
 {
-  "users": [
-    {
-      "id": "25247b73-ab0c-4751-8e38-0aaa84089b50",
-      "name": "Anirudh",
-      "email": "coolguyam.7398@gmail.com",
-      "passwordHash": "c39c01be855f7d47b76f6126035ec3eb5589f7df6e67e1211324118b04d74829f59360033cf7f8b4bb299ac7e69638dffeea1f9e0ab3e26e63e076e62efd3899",
-      "passwordSalt": "141852f36929f2842a4a7c5e52e261da",
-      "createdAt": "2026-09-17T08:53:18.230Z"
-    }
-  ],
-  "entries": [
-    {
-      "title": "yu",
-      "content": "yiuuj",
-      "mood": "Calm",
-      "seconds": 8,
-      "words": 1,
-      "wpm": 8,
-      "id": "a7400dd3-ede8-4cbe-8139-1c8ade00acc6",
-      "userId": "25247b73-ab0c-4751-8e38-0aaa84089b50",
-      "createdAt": "2026-09-17T08:54:07.143Z",
-      "updatedAt": "2026-09-17T08:54:07.143Z"
-    }
-  ]
+  "users": [],
+  "entries": []
 }

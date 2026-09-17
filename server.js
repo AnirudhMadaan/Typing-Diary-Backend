@@ -234,5 +234,28 @@ if (!process.env.VERCEL) {
     console.log(`Typing Diary backend listening on http://localhost:${port}`);
   });
 }
+// DELETE /api/auth/me - Delete current logged-in user account and their entries
+app.delete("/api/auth/me", async (req, res) => {
+  const userId = await requireUser(req, res);
+  if (!userId) return;
+
+  await updateState((current) => {
+    // 1. Remove user entries
+    current.entries = current.entries.filter((entry) => entry.userId !== userId);
+    // 2. Remove user account
+    current.users = current.users.filter((user) => user.id !== userId);
+  });
+
+  // Clear session cookie
+  const isProduction = process.env.NODE_ENV === "production" || Boolean(process.env.VERCEL);
+  res.clearCookie(cookieName, {
+    httpOnly: true,
+    sameSite: isProduction ? "none" : "lax",
+    secure: isProduction,
+    path: "/",
+  });
+
+  return res.status(200).json({ message: "Account and associated entries deleted successfully." });
+});
 
 export default app;
