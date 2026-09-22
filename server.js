@@ -4,6 +4,7 @@ import path from "node:path";
 import express from "express";
 import cors from "cors";
 import cookieParser from "cookie-parser";
+import { Redis } from "@upstash/redis";
 
 const app = express();
 const port = Number(process.env.PORT || 8080);
@@ -11,9 +12,16 @@ const sessionSecret = process.env.SESSION_SECRET;
 const dataDirectory = process.env.DATA_DIR || path.resolve(process.cwd(), "data");
 const dataFile = path.join(dataDirectory, "typing-diary.json");
 const cookieName = "typing_diary_session";
-const sessionLifetime = 60 * 60 * 24 * 7;
+const sessionLifetime = 60 * 60 * 24 * 30;
 let statePromise;
 let writeQueue = Promise.resolve();
+
+// Vercel Functions are stateless. Use Upstash Redis when deployed so accounts
+// and diary entries survive cold starts and new serverless instances.
+const redisUrl = process.env.UPSTASH_REDIS_REST_URL || process.env.KV_REST_API_URL;
+const redisToken = process.env.UPSTASH_REDIS_REST_TOKEN || process.env.KV_REST_API_TOKEN;
+const redis = redisUrl && redisToken ? new Redis({ url: redisUrl, token: redisToken }) : null;
+const redisStateKey = "typing-diary:state:v2";
 
 if (!sessionSecret) {
   throw new Error("SESSION_SECRET must be set before starting the Typing Diary backend.");
@@ -21,8 +29,8 @@ if (!sessionSecret) {
 
 const emptyState = () => ({ users: [], entries: [] });
 
-async function getState() {
-  statePromise ??= readFile(dataFile, "utf8")
+async function readLocalState() {
+  return readFile(dataFile, "utf8")
     .then((contents) => {
       const parsed = JSON.parse(contents);
       return Array.isArray(parsed.users) && Array.isArray(parsed.entries) ? parsed : emptyState();
@@ -31,10 +39,29 @@ async function getState() {
       if (error.code === "ENOENT") return emptyState();
       throw error;
     });
+}
+
+async function getState() {
+  statePromise ??= (async () => {
+    if (redis) {
+      const stored = await redis.get(redisStateKey);
+      if (!stored) return emptyState();
+      const parsed = typeof stored === "string" ? JSON.parse(stored) : stored;
+      return Array.isArray(parsed.users) && Array.isArray(parsed.entries) ? parsed : emptyState();
+    }
+    if (process.env.VERCEL) {
+      throw new Error("Persistent database is not configured. Add UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN to Vercel.");
+    }
+    return readLocalState();
+  })();
   return statePromise;
 }
 
 async function saveState(state) {
+  if (redis) {
+    await redis.set(redisStateKey, state);
+    return;
+  }
   await mkdir(dataDirectory, { recursive: true });
   const temporaryFile = `${dataFile}.tmp`;
   await writeFile(temporaryFile, JSON.stringify(state, null, 2), "utf8");
@@ -44,18 +71,7 @@ async function saveState(state) {
 async function updateState(callback) {
   const current = await getState();
   callback(current);
-  writeQueue = writeQueue
-    .then(() => saveState(current))
-    .catch((error) => {
-      // Vercel serverless functions do not provide durable writes to the
-      // deployed project directory. Keep the in-memory state so an otherwise
-      // successful auth request is not reported as a failed request.
-      if (process.env.VERCEL) {
-        console.warn("Typing Diary: persistent JSON storage is unavailable on Vercel.", error.message);
-        return undefined;
-      }
-      throw error;
-    });
+  writeQueue = writeQueue.then(() => saveState(current));
   await writeQueue;
   return current;
 }
@@ -188,6 +204,9 @@ app.get("/api/auth/me", async (req, res) => {
   const state = await getState();
   const user = state.users.find((candidate) => candidate.id === userId);
   if (!user) return res.status(401).json({ error: "Not signed in." });
+  // Sliding session: an active user gets another 30 days whenever the app
+  // checks the session, instead of being unexpectedly logged out.
+  setSession(res, user.id);
   return res.json({ user: publicUser(user) });
 });
 
