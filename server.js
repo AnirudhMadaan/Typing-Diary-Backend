@@ -140,6 +140,8 @@ function normalizeEntry(body) {
   const title = typeof body?.title === "string" ? body.title.trim() : "";
   const content = typeof body?.content === "string" ? body.content.trim() : "";
   const mood = typeof body?.mood === "string" ? body.mood.trim().slice(0, 24) : "";
+  const pageProfile = normalizePageProfile(body?.pageProfile);
+  const globalProfile = normalizeGlobalProfile(body?.globalProfile);
   const seconds = typeof body?.seconds === "number" && Number.isFinite(body.seconds)
     ? Math.max(0, Math.round(body.seconds))
     : 0;
@@ -147,7 +149,36 @@ function normalizeEntry(body) {
   if (!content || content.length > 50000) return { error: "Write something before saving (up to 50,000 characters)." };
   const words = countWords(content);
   const wpm = seconds > 0 ? Math.round(words / (seconds / 60)) : 0;
-  return { title, content, mood, seconds, words, wpm };
+  return { title, content, mood, seconds, words, wpm, pageProfile, globalProfile };
+}
+
+function normalizePageProfile(profile) {
+  if (!profile || typeof profile !== "object") return null;
+  const fonts = new Set(["dm", "lora", "fraunces", "caveat", "patrick", "kalam", "mono"]);
+  const pages = new Set(["lined", "grid", "dots", "paper", "blank"]);
+  const aligns = new Set(["left", "center", "right", "justify"]);
+  return {
+    font: fonts.has(profile.font) ? profile.font : "lora",
+    pageStyle: pages.has(profile.pageStyle) ? profile.pageStyle : "lined",
+    fontSize: Number.isFinite(Number(profile.fontSize)) ? Math.min(28, Math.max(12, Number(profile.fontSize))) : 16,
+    lineHeight: Number.isFinite(Number(profile.lineHeight)) ? Math.min(2.6, Math.max(1.2, Number(profile.lineHeight))) : 1.9,
+    editorWidth: Number.isFinite(Number(profile.editorWidth)) ? Math.min(980, Math.max(520, Number(profile.editorWidth))) : 720,
+    align: aligns.has(profile.align) ? profile.align : "left",
+    textColor: typeof profile.textColor === "string" && /^#[0-9a-fA-F]{6}$/.test(profile.textColor) ? profile.textColor : "",
+  };
+}
+
+function normalizeGlobalProfile(profile) {
+  if (!profile || typeof profile !== "object") return null;
+  const palettes = new Set(["forest", "ink", "ocean", "rose", "lavender", "sunset"]);
+  const icons = new Set(["✦", "✎", "♡", "☼", "☾", "❋", "◌"]);
+  return {
+    palette: palettes.has(profile.palette) ? profile.palette : "forest",
+    accent: typeof profile.accent === "string" && /^#[0-9a-fA-F]{6}$/.test(profile.accent) ? profile.accent : "",
+    texture: profile.texture !== false,
+    icon: icons.has(profile.icon) ? profile.icon : "✦",
+    compact: profile.compact === true,
+  };
 }
 
 // Fixed CORS configuration for Vercel
@@ -210,6 +241,28 @@ app.get("/api/auth/me", async (req, res) => {
   return res.json({ user: publicUser(user) });
 });
 
+app.get("/api/settings", async (req, res) => {
+  const userId = await requireUser(req, res);
+  if (!userId) return;
+  const state = await getState();
+  const user = state.users.find((candidate) => candidate.id === userId);
+  return res.json({ settings: user?.settings || null });
+});
+
+app.put("/api/settings", async (req, res) => {
+  const userId = await requireUser(req, res);
+  if (!userId) return;
+  const page = normalizePageProfile(req.body?.page);
+  const global = normalizeGlobalProfile(req.body?.global);
+  await updateState((current) => {
+    const user = current.users.find((candidate) => candidate.id === userId);
+    if (user) user.settings = { page, global, updatedAt: new Date().toISOString() };
+  });
+  const state = await getState();
+  const user = state.users.find((candidate) => candidate.id === userId);
+  return res.json({ settings: user?.settings || null });
+});
+
 app.get("/api/entries", async (req, res) => {
   const userId = await requireUser(req, res);
   if (!userId) return;
@@ -243,6 +296,24 @@ app.put("/api/entries/:id", async (req, res) => {
     const currentEntry = current.entries.find((candidate) => candidate.id === entry.id);
     Object.assign(currentEntry, input, { updatedAt: new Date().toISOString() });
   });
+  return res.json({ entry });
+});
+
+app.patch("/api/entries/:id/design", async (req, res) => {
+  const userId = await requireUser(req, res);
+  if (!userId) return;
+  const pageProfile = normalizePageProfile(req.body?.pageProfile);
+  const globalProfile = normalizeGlobalProfile(req.body?.globalProfile);
+  await updateState((current) => {
+    const entry = current.entries.find((candidate) => candidate.id === req.params.id && candidate.userId === userId);
+    if (!entry) return;
+    entry.pageProfile = pageProfile || entry.pageProfile || null;
+    entry.globalProfile = globalProfile || entry.globalProfile || null;
+    entry.updatedAt = new Date().toISOString();
+  });
+  const state = await getState();
+  const entry = state.entries.find((candidate) => candidate.id === req.params.id && candidate.userId === userId);
+  if (!entry) return res.status(404).json({ error: "Entry not found." });
   return res.json({ entry });
 });
 
