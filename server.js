@@ -44,7 +44,18 @@ async function saveState(state) {
 async function updateState(callback) {
   const current = await getState();
   callback(current);
-  writeQueue = writeQueue.then(() => saveState(current));
+  writeQueue = writeQueue
+    .then(() => saveState(current))
+    .catch((error) => {
+      // Vercel serverless functions do not provide durable writes to the
+      // deployed project directory. Keep the in-memory state so an otherwise
+      // successful auth request is not reported as a failed request.
+      if (process.env.VERCEL) {
+        console.warn("Typing Diary: persistent JSON storage is unavailable on Vercel.", error.message);
+        return undefined;
+      }
+      throw error;
+    });
   await writeQueue;
   return current;
 }
