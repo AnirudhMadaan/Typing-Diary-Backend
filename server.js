@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import { createHmac, randomBytes, randomUUID, scryptSync, timingSafeEqual } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -12,6 +13,7 @@ const sessionSecret = process.env.SESSION_SECRET;
 const dataDirectory = process.env.DATA_DIR || path.resolve(process.cwd(), "data");
 const dataFile = path.join(dataDirectory, "typing-diary.json");
 const cookieName = "typing_diary_session";
+const googleStateCookie = "typing_diary_google_state";
 const sessionLifetime = 60 * 60 * 24 * 30;
 let statePromise;
 let writeQueue = Promise.resolve();
@@ -77,7 +79,42 @@ async function updateState(callback) {
 }
 
 function publicUser(user) {
-  return { id: user.id, name: user.name, email: user.email, createdAt: user.createdAt };
+  return {
+    id: user.id,
+    name: user.name,
+    username: user.username || usernameFromName(user.name),
+    bio: user.bio || "",
+    avatar: user.avatar || "",
+    provider: user.googleSub ? "google" : "password",
+    email: user.email,
+    createdAt: user.createdAt,
+  };
+}
+
+function usernameFromName(value) {
+  const base = String(value || "writer")
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9_]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 20);
+  if (!base) return "writer";
+  return base.length < 3 ? `${base}_writer`.slice(0, 24) : base;
+}
+
+function uniqueUsername(state, requested, exceptUserId = "") {
+  const base = usernameFromName(requested).slice(0, 20);
+  const taken = (candidate) => state.users.some((user) =>
+    user.id !== exceptUserId &&
+    (user.username || usernameFromName(user.name)).toLowerCase() === candidate.toLowerCase()
+  );
+  if (!taken(base)) return base;
+  for (let suffix = 2; suffix < 10000; suffix += 1) {
+    const candidate = `${base.slice(0, 24 - String(suffix).length - 1)}_${suffix}`;
+    if (!taken(candidate)) return candidate;
+  }
+  return `${base}_${randomBytes(3).toString("hex")}`;
 }
 
 function hashPassword(password, salt = randomBytes(16).toString("hex")) {
@@ -182,9 +219,24 @@ function normalizeGlobalProfile(profile) {
 }
 
 // Fixed CORS configuration for Vercel
+const configuredOrigins = [
+  process.env.FRONTEND_ORIGIN,
+  process.env.FRONTEND_URL,
+  ...(process.env.EXTRA_FRONTEND_ORIGINS || "").split(","),
+].filter(Boolean).map((origin) => origin.trim().replace(/\/+$/, ""));
+const allowedOrigins = new Set([
+  "http://localhost:5500",
+  "http://127.0.0.1:5500",
+  "http://localhost:3000",
+  "http://127.0.0.1:3000",
+  ...configuredOrigins,
+]);
+
 app.use(cors({
-  origin: true,
+  origin: (origin, callback) => callback(null, !origin || allowedOrigins.has(origin.replace(/\/+$/, ""))),
   credentials: true,
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type"],
 }));
 
 app.use(cookieParser());
@@ -197,16 +249,139 @@ app.post("/api/auth/register", async (req, res) => {
   const name = typeof req.body?.name === "string" ? req.body.name.trim() : "";
   const email = typeof req.body?.email === "string" ? req.body.email.trim().toLowerCase() : "";
   const password = typeof req.body?.password === "string" ? req.body.password : "";
+  const requestedUsername = typeof req.body?.username === "string" ? req.body.username.trim().toLowerCase() : usernameFromName(name);
+  const bio = typeof req.body?.bio === "string" ? req.body.bio.trim().slice(0, 280) : "";
   if (name.length < 2 || name.length > 80) return res.status(400).json({ error: "Please enter a name between 2 and 80 characters." });
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return res.status(400).json({ error: "Please enter a valid email address." });
   if (password.length < 8) return res.status(400).json({ error: "Use a password with at least 8 characters." });
+  if (!/^[a-z0-9_]{3,24}$/.test(requestedUsername)) return res.status(400).json({ error: "Username must be 3–24 characters using lowercase letters, numbers, or underscores." });
   const state = await getState();
   if (state.users.some((user) => user.email === email)) return res.status(409).json({ error: "An account with that email already exists." });
+  if (state.users.some((user) => (user.username || usernameFromName(user.name)).toLowerCase() === requestedUsername)) return res.status(409).json({ error: "That username is already taken." });
   const { hash, salt } = hashPassword(password);
-  const user = { id: randomUUID(), name, email, passwordHash: hash, passwordSalt: salt, createdAt: new Date().toISOString() };
+  const user = { id: randomUUID(), name, username: requestedUsername, bio, email, passwordHash: hash, passwordSalt: salt, createdAt: new Date().toISOString() };
   await updateState((current) => current.users.push(user));
   setSession(res, user.id);
   return res.status(201).json({ user: publicUser(user) });
+});
+
+app.get("/api/auth/google/start", (req, res) => {
+  const { GOOGLE_CLIENT_ID, GOOGLE_REDIRECT_URI } = process.env;
+  if (!GOOGLE_CLIENT_ID || !process.env.GOOGLE_CLIENT_SECRET || !GOOGLE_REDIRECT_URI) {
+    return res.status(503).json({ error: "Google sign-in is not configured yet. Add the Google OAuth settings to the backend environment." });
+  }
+  const state = randomBytes(32).toString("base64url");
+  const isProduction = process.env.NODE_ENV === "production" || Boolean(process.env.VERCEL);
+  res.cookie(googleStateCookie, state, {
+    httpOnly: true,
+    sameSite: "lax",
+    secure: isProduction,
+    maxAge: 5 * 60 * 1000,
+    path: "/",
+  });
+  const url = new URL("https://accounts.google.com/o/oauth2/v2/auth");
+  url.search = new URLSearchParams({
+    client_id: GOOGLE_CLIENT_ID,
+    redirect_uri: GOOGLE_REDIRECT_URI,
+    response_type: "code",
+    scope: "openid email profile",
+    state,
+    prompt: "select_account",
+  }).toString();
+  return res.redirect(url.toString());
+});
+
+app.get("/api/auth/google/callback", async (req, res) => {
+  const frontendUrl = (process.env.FRONTEND_URL || process.env.FRONTEND_ORIGIN || "").replace(/\/+$/, "");
+  const redirectWithStatus = (key, value) => {
+    const destination = frontendUrl ? new URL("/", `${frontendUrl}/`) : new URL("/", "http://localhost:5500");
+    destination.searchParams.set(key, value);
+    return res.redirect(destination.toString());
+  };
+  const stateCookie = req.cookies?.[googleStateCookie];
+  res.clearCookie(googleStateCookie, {
+    httpOnly: true,
+    sameSite: "lax",
+    secure: process.env.NODE_ENV === "production" || Boolean(process.env.VERCEL),
+    path: "/",
+  });
+  if (!frontendUrl) return res.status(500).send("Set FRONTEND_URL before configuring Google sign-in.");
+  if (!req.query.state || !stateCookie || req.query.state !== stateCookie) {
+    return redirectWithStatus("auth_error", "Google sign-in could not be verified. Please try again.");
+  }
+  if (typeof req.query.code !== "string") {
+    return redirectWithStatus("auth_error", "Google sign-in was cancelled or did not complete.");
+  }
+
+  try {
+    const tokenResponse = await fetch("https://oauth2.googleapis.com/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        code: req.query.code,
+        client_id: process.env.GOOGLE_CLIENT_ID,
+        client_secret: process.env.GOOGLE_CLIENT_SECRET,
+        redirect_uri: process.env.GOOGLE_REDIRECT_URI,
+        grant_type: "authorization_code",
+      }),
+    });
+    const tokenData = await tokenResponse.json();
+    if (!tokenResponse.ok || !tokenData.access_token) {
+      console.error("Google token exchange failed:", tokenData.error || tokenResponse.status);
+      return redirectWithStatus("auth_error", "Google sign-in could not be completed. Please try again.");
+    }
+
+    const profileResponse = await fetch("https://openidconnect.googleapis.com/v1/userinfo", {
+      headers: { Authorization: `Bearer ${tokenData.access_token}` },
+    });
+    const profile = await profileResponse.json();
+    if (!profileResponse.ok || !profile.sub || !profile.email || profile.email_verified !== true) {
+      return redirectWithStatus("auth_error", "Google did not provide a verified email address.");
+    }
+
+    const state = await getState();
+    let user = state.users.find((candidate) => candidate.googleSub === profile.sub);
+    if (!user) {
+      const email = String(profile.email).trim().toLowerCase();
+      user = state.users.find((candidate) => candidate.email === email);
+      if (user) {
+        // Google has verified the email, so an existing password account with
+        // that address can be linked without replacing its password.
+        await updateState((current) => {
+          const matched = current.users.find((candidate) => candidate.id === user.id);
+          matched.googleSub = profile.sub;
+          matched.avatar = typeof profile.picture === "string" ? profile.picture : "";
+          matched.name ||= String(profile.name || email.split("@")[0]).slice(0, 80);
+          matched.username ||= uniqueUsername(current, profile.given_name || matched.name, matched.id);
+          matched.bio ||= "";
+        });
+        user = (await getState()).users.find((candidate) => candidate.id === user.id);
+      } else {
+        const displayName = String(profile.name || profile.given_name || email.split("@")[0]).trim().slice(0, 80) || "Writer";
+        let created;
+        await updateState((current) => {
+          created = {
+            id: randomUUID(),
+            name: displayName,
+            username: uniqueUsername(current, profile.given_name || displayName),
+            bio: "",
+            avatar: typeof profile.picture === "string" ? profile.picture : "",
+            email,
+            googleSub: profile.sub,
+            createdAt: new Date().toISOString(),
+          };
+          current.users.push(created);
+        });
+        user = created;
+      }
+    }
+
+    setSession(res, user.id);
+    return redirectWithStatus("auth", "success");
+  } catch (error) {
+    console.error("Google sign-in failed:", error);
+    return redirectWithStatus("auth_error", "Google sign-in is temporarily unavailable. Please try again.");
+  }
 });
 
 app.post("/api/auth/login", async (req, res) => {
@@ -239,6 +414,28 @@ app.get("/api/auth/me", async (req, res) => {
   // checks the session, instead of being unexpectedly logged out.
   setSession(res, user.id);
   return res.json({ user: publicUser(user) });
+});
+
+app.patch("/api/profile", async (req, res) => {
+  const userId = await requireUser(req, res);
+  if (!userId) return;
+  const name = typeof req.body?.name === "string" ? req.body.name.trim() : "";
+  const username = typeof req.body?.username === "string" ? req.body.username.trim().toLowerCase() : "";
+  const bio = typeof req.body?.bio === "string" ? req.body.bio.trim() : "";
+  if (name.length < 2 || name.length > 80) return res.status(400).json({ error: "Display name must be 2–80 characters." });
+  if (!/^[a-z0-9_]{3,24}$/.test(username)) return res.status(400).json({ error: "Username must be 3–24 characters using lowercase letters, numbers, or underscores." });
+  if (bio.length > 280) return res.status(400).json({ error: "Bio must be 280 characters or fewer." });
+
+  const state = await getState();
+  if (state.users.some((user) => user.id !== userId && (user.username || usernameFromName(user.name)).toLowerCase() === username)) {
+    return res.status(409).json({ error: "That username is already taken." });
+  }
+  await updateState((current) => {
+    const user = current.users.find((candidate) => candidate.id === userId);
+    if (user) Object.assign(user, { name, username, bio });
+  });
+  const updatedUser = (await getState()).users.find((user) => user.id === userId);
+  return res.json({ user: publicUser(updatedUser) });
 });
 
 app.get("/api/settings", async (req, res) => {
