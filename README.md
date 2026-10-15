@@ -1,30 +1,26 @@
 # Typing Diary — Backend
 
-Express API for the static frontend. Deploy this folder as its own Vercel project.
+Standalone Express API for the static frontend. It listens on `PORT`, then `API_PORT`, then `8080`. If `../frontend/dist/` exists, it serves that frontend from the same origin as the API.
 
-## Environment variables
+## Required environment
 
-Required for deployment:
+- `SESSION_SECRET` — long random value for signing session cookies.
+- `FRONTEND_URL` and `FRONTEND_ORIGIN` — exact frontend origin (for local development, `http://localhost:5500`).
+- `UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN` — required for durable deployments. Local development can omit them and use `data/typing-diary.json`.
+- Optional Google OAuth: `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REDIRECT_URI`.
 
-- `SESSION_SECRET` — a long, random value used to sign sessions.
-- `UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN` — durable account, entry, and settings storage.
-- `FRONTEND_URL` — the deployed frontend origin, for example `https://diary.example.com`.
-- `FRONTEND_ORIGIN` — that same exact origin, used to restrict credentialed browser requests.
-- `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, and `GOOGLE_REDIRECT_URI` — Google OAuth web client settings. Keep the secret only in backend environment variables.
+The server does not load `.env` automatically. Set variables in the shell before starting it. For local PowerShell:
 
-For local development, copy `.env.example` to `.env`, fill in the OAuth and Upstash values, and set `GOOGLE_REDIRECT_URI` to `http://localhost:8080/api/auth/google/callback`. In your shell, load the file before starting the server with `set -a && . ./.env && set +a`. If you are only testing email/password locally, Google OAuth variables can be omitted.
-
-Google Cloud Console must list the backend callback URL as an authorized redirect URI. Add the frontend origin to authorized JavaScript origins. The application requests only the OpenID Connect `openid email profile` scopes.
-
-Run locally:
-
-```bash
-npm install
-npm start
+```powershell
+$env:SESSION_SECRET = "use-a-long-random-value"
+$env:FRONTEND_URL = "http://localhost:5500"
+$env:FRONTEND_ORIGIN = "http://localhost:5500"
+npm install --registry=https://registry.npmjs.org
+npm run dev
 ```
 
-The API listens on port 8080. For local-only storage, `SESSION_SECRET` is still required; when not running on Vercel the API writes its JSON data file under `backend/data/`.
+For Google login locally, set `GOOGLE_REDIRECT_URI` to `http://localhost:8080/api/auth/google/callback` and configure that exact URI in Google Cloud Console. Keep the Google client secret in backend environment variables only.
 
-## Vercel deployment
+## Deployment
 
-Import the repository and set the Vercel project root to `backend/`. Add the environment variables above in Vercel, then deploy. The `api/` entry point and `vercel.json` route API requests to Express. Use a custom domain or sibling subdomains for the frontend and API when possible so browser cookie policies do not block cross-site sessions.
+Set the Vercel project root to `backend/` (or deploy this folder as a Node service). Configure the required environment variables above; serverless deployments require Upstash because local files are not durable. This API continues to use the older project's Upstash key, `typing-diary:state:v2`.
